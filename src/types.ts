@@ -2,6 +2,16 @@ export type SafetyStatus = 'alert' | 'clear';
 
 export type AlarmState = 'idle' | 'armed' | 'ringing' | 'postponed';
 
+/** Метадані власної мелодії (сам MP3 зберігається в IndexedDB, не в localStorage). */
+export interface AlarmMelody {
+  /** Ім'я завантаженого файлу. */
+  fileName: string;
+  /** Тривалість у секундах (не більше 30). */
+  duration: number;
+  /** Розмір файлу в байтах. */
+  size: number;
+}
+
 export interface AlarmItem {
   id: string;
   time: string;
@@ -9,6 +19,8 @@ export interface AlarmItem {
   label: string;
   soundOn: boolean;
   daysOfWeek: string[];
+  /** Власна мелодія замість стандартного сигналу. */
+  melody?: AlarmMelody | null;
 }
 
 /** Стан тривоги, отриманий з API (ручного режиму більше немає). */

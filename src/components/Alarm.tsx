@@ -2,8 +2,12 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   Bell, BellRing, Plus, Trash2, Volume2, VolumeX,
   Moon, Sunrise, Play, Square,
+  Music2, Upload, Loader2, Pause, X,
 } from 'lucide-react';
-import type { SafetyStatus, AlarmItem } from '../types';
+import type { SafetyStatus, AlarmItem, AlarmMelody } from '../types';
+import {
+  MAX_MELODY_SECONDS, deleteAlarmMelody, formatDuration, getAlarmMelody, prepareAlarmMelody, saveAlarmMelody,
+} from '../soundStore';
 
 /** Порядок з понеділка. `code` зберігається у localStorage. */
 const DAYS = [
@@ -32,6 +36,7 @@ interface Props {
   onToggleSound: (id: string) => void;
   onToggleDay: (id: string, day: string) => void;
   onDismissed: (id: string) => void;
+  onMelodyChange: (id: string, melody: AlarmMelody | null) => void;
   safetyStatus: SafetyStatus | null;
   alertLevel: 'red' | 'yellow' | null;
   postponeOnRed: boolean;
@@ -41,7 +46,7 @@ interface Props {
 
 export function Alarm({
   alarms, onAdd, onDelete, onToggle, onSetTime, onToggleSound, onToggleDay, onDismissed,
-  safetyStatus, alertLevel, postponeOnRed, postponeOnYellow, regionName,
+  onMelodyChange, safetyStatus, alertLevel, postponeOnRed, postponeOnYellow, regionName,
 }: Props) {
   const [newTime, setNewTime] = useState('07:30');
   const [newLabel, setNewLabel] = useState('');
@@ -132,6 +137,7 @@ export function Alarm({
             onToggleDay={(day) => onToggleDay(a.id, day)}
             onDelete={() => onDelete(a.id)}
             onDismissed={() => onDismissed(a.id)}
+            onMelodyChange={(melody) => onMelodyChange(a.id, melody)}
           />
         ))}
       </div>
@@ -187,17 +193,27 @@ interface RowProps {
   onToggleDay: (day: string) => void;
   onDelete: () => void;
   onDismissed: () => void;
+  onMelodyChange: (melody: AlarmMelody | null) => void;
 }
 
 function AlarmRow({
   alarm, safetyStatus, alertLevel, postponeOnRed, postponeOnYellow, regionName,
-  onToggle, onSetTime, onToggleSound, onToggleDay, onDelete, onDismissed,
+  onToggle, onSetTime, onToggleSound, onToggleDay, onDelete, onDismissed, onMelodyChange,
 }: RowProps) {
   const [triggered, setTriggered] = useState(false);
   const [postponed, setPostponed] = useState(false);
   const [timeLeft, setTimeLeft] = useState('');
+  const [melodyBusy, setMelodyBusy] = useState(false);
+  const [melodyError, setMelodyError] = useState<string | null>(null);
+  const [previewOn, setPreviewOn] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const beepRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ringUrlRef = useRef<string | null>(null);
+  const previewRef = useRef<HTMLAudioElement | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+  const previewTokenRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const firedKeyRef = useRef<string>('');
 
   const days = alarm.daysOfWeek && alarm.daysOfWeek.length > 0 ? alarm.daysOfWeek : ALL_DAYS;
@@ -212,6 +228,40 @@ function AlarmRow({
       clearInterval(beepRef.current);
       beepRef.current = null;
     }
+  }, []);
+
+  /** Зупиняє відтворення MP3-мелодії під час дзвінка. */
+  const stopRingAudio = useCallback(() => {
+    if (ringAudioRef.current) {
+      ringAudioRef.current.pause();
+      ringAudioRef.current.removeAttribute('src');
+      ringAudioRef.current.load();
+      ringAudioRef.current = null;
+    }
+    if (ringUrlRef.current) {
+      URL.revokeObjectURL(ringUrlRef.current);
+      ringUrlRef.current = null;
+    }
+  }, []);
+
+  /** Зупиняє прослуховування мелодії у списку будильників. */
+  const stopPreview = useCallback(() => {
+    // Інвалідовуємо ще не завершене завантаження мелодії зі сховища.
+    previewTokenRef.current += 1;
+    const audio = previewRef.current;
+    if (audio) {
+      // Без явного pause() відтворення триває навіть після revokeObjectURL.
+      audio.pause();
+      audio.onended = null;
+      audio.removeAttribute('src');
+      audio.load();
+      previewRef.current = null;
+    }
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+    setPreviewOn(false);
   }, []);
 
   const playBeep = useCallback(() => {
@@ -317,29 +367,137 @@ function AlarmRow({
     }
   }, [postponed, shouldPostpone]);
 
-  // Цикл звуку.
+  // Цикл звуку: власна MP3-мелодія, а якщо її немає — стандартний сигнал.
   useEffect(() => {
-    if (triggered) {
+    if (!triggered || !alarm.soundOn) {
+      stopBeep();
+      stopRingAudio();
+      return;
+    }
+
+    stopPreview();
+
+    if (!alarm.melody) {
       playBeep();
       beepRef.current = setInterval(playBeep, 1500);
-    } else {
-      stopBeep();
+      return () => {
+        stopBeep();
+      };
     }
-    return stopBeep;
-  }, [triggered, playBeep, stopBeep]);
+
+    let cancelled = false;
+
+    void (async () => {
+      const blob = await getAlarmMelody(alarm.id);
+      if (cancelled) return;
+
+      if (!blob) {
+        // Файл не знайшовся (наприклад, очищено сховище) — не мовчимо.
+        playBeep();
+        beepRef.current = setInterval(playBeep, 1500);
+        return;
+      }
+
+      const url = URL.createObjectURL(blob);
+      ringUrlRef.current = url;
+      const audio = new Audio(url);
+      audio.loop = true;
+      audio.volume = 0.8;
+      ringAudioRef.current = audio;
+
+      try {
+        await audio.play();
+      } catch {
+        // Автовідтворення заблоковане браузером — дублюємо стандартним сигналом.
+        if (!cancelled) {
+          stopRingAudio();
+          playBeep();
+          beepRef.current = setInterval(playBeep, 1500);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      stopBeep();
+      stopRingAudio();
+    };
+  }, [
+    triggered, alarm.soundOn, alarm.melody, alarm.id,
+    playBeep, stopBeep, stopRingAudio, stopPreview,
+  ]);
 
   // Прибирання.
   useEffect(() => {
     return () => {
       stopBeep();
+      stopRingAudio();
+      stopPreview();
       if (audioCtxRef.current) void audioCtxRef.current.close();
     };
-  }, [stopBeep]);
+  }, [stopBeep, stopRingAudio, stopPreview]);
 
   const dismiss = () => {
     setTriggered(false);
     stopBeep();
+    stopRingAudio();
+    stopPreview();
     onDismissed();
+  };
+
+  /** Завантаження власної мелодії: перевірка формату/тривалості + збереження. */
+  const handleMelodyFile = async (file: File | undefined) => {
+    if (!file) return;
+    setMelodyError(null);
+    setMelodyBusy(true);
+    stopPreview();
+    try {
+      const { blob, melody } = await prepareAlarmMelody(file);
+      await saveAlarmMelody(alarm.id, blob);
+      onMelodyChange(melody);
+    } catch (error) {
+      setMelodyError(error instanceof Error ? error.message : 'Не вдалося додати мелодію.');
+    } finally {
+      setMelodyBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const removeMelody = async () => {
+    stopPreview();
+    await deleteAlarmMelody(alarm.id);
+    onMelodyChange(null);
+    setMelodyError(null);
+  };
+
+  /** Прослуховування мелодії без дзвінка. */
+  const togglePreview = async () => {
+    if (previewOn) {
+      stopPreview();
+      return;
+    }
+    const token = previewTokenRef.current + 1;
+    previewTokenRef.current = token;
+    const blob = await getAlarmMelody(alarm.id);
+    // Поки читали файл, користувач міг натиснути «стоп» або інший будильник.
+    if (token !== previewTokenRef.current) return;
+    if (!blob) {
+      setMelodyError('Файл мелодії не знайдено. Додайте його ще раз.');
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    previewUrlRef.current = url;
+    const audio = new Audio(url);
+    audio.volume = 0.8;
+    audio.onended = stopPreview;
+    previewRef.current = audio;
+    setPreviewOn(true);
+    try {
+      await audio.play();
+    } catch {
+      stopPreview();
+      setMelodyError('Браузер заблокував відтворення. Спробуйте ще раз.');
+    }
   };
 
   const isRinging = triggered;
@@ -431,6 +589,73 @@ function AlarmRow({
           onToggle={onToggleDay}
           legend={`Дні будильника ${alarm.time}`}
         />
+      </div>
+
+      {/* Власна мелодія (MP3, до 30 секунд) */}
+      <div className="mt-3 rounded-lg border border-ink-border bg-ink px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
+          <Music2 className={`w-3.5 h-3.5 flex-shrink-0 ${alarm.melody ? 'text-accent' : 'text-muted-soft'}`} />
+
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-fg-soft truncate">
+              {alarm.melody ? alarm.melody.fileName : 'Стандартний сигнал'}
+            </p>
+            <p className="text-[11px] text-muted-soft truncate">
+              {alarm.melody
+                ? `${formatDuration(alarm.melody.duration)} · MP3`
+                : `Можна додати свій MP3 до ${MAX_MELODY_SECONDS} с`}
+            </p>
+          </div>
+
+          {alarm.melody && (
+            <button
+              type="button"
+              onClick={() => void togglePreview()}
+              aria-label={previewOn ? 'Зупинити прослуховування' : 'Прослухати мелодію'}
+              title={previewOn ? 'Зупинити' : 'Прослухати'}
+              className="flex items-center justify-center w-7 h-7 rounded-md bg-ink-soft border border-ink-border text-muted hover:text-fg transition-colors flex-shrink-0"
+            >
+              {previewOn ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+            </button>
+          )}
+
+          <label
+            className={`flex items-center gap-1.5 rounded-md border border-ink-border bg-ink-soft px-2 py-1.5 text-xs text-muted hover:text-fg cursor-pointer transition-colors flex-shrink-0 ${
+              melodyBusy ? 'opacity-60 pointer-events-none' : ''
+            }`}
+            title="Обрати MP3-файл (до 30 секунд)"
+          >
+            {melodyBusy ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Upload className="w-3 h-3" />
+            )}
+            {alarm.melody ? 'Замінити' : 'Обрати MP3'}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="audio/mpeg,audio/mp3,.mp3"
+              className="sr-only"
+              onChange={(e) => void handleMelodyFile(e.target.files?.[0])}
+            />
+          </label>
+
+          {alarm.melody && (
+            <button
+              type="button"
+              onClick={() => void removeMelody()}
+              aria-label="Видалити власну мелодію"
+              title="Видалити мелодію"
+              className="flex items-center justify-center w-7 h-7 rounded-md border border-ink-border bg-ink-soft text-muted-soft hover:text-alert hover:border-alert transition-colors flex-shrink-0"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {melodyError && (
+          <p className="mt-1.5 text-[11px] leading-snug text-alert">{melodyError}</p>
+        )}
       </div>
 
       {/* Банер дзвінка */}

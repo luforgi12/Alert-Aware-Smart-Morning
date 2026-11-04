@@ -4,8 +4,9 @@ import { Clock as ClockWidget } from './components/Clock';
 import { SettingsModal } from './components/SettingsModal';
 import { Alarm } from './components/Alarm';
 import { hasAlertsKey, fetchAlertStatus } from './api';
+import { deleteAlarmMelody } from './soundStore';
 import { OBLASTS, districtsOf, oblastByUid } from './locations';
-import type { AlertState, AlarmItem } from './types';
+import type { AlertState, AlarmItem, AlarmMelody } from './types';
 import type { Theme } from './components/SettingsModal';
 
 const LS_ALARMS = 'alarms_list';
@@ -39,6 +40,7 @@ function loadAlarms(): AlarmItem[] {
             label: alarm.label || '',
             soundOn: alarm.soundOn !== false,
             daysOfWeek: alarm.daysOfWeek || ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+            melody: normalizeMelody(alarm.melody),
           });
         }
         return result;
@@ -50,6 +52,20 @@ function loadAlarms(): AlarmItem[] {
 
 function saveAlarms(alarms: AlarmItem[]): void {
   localStorage.setItem(LS_ALARMS, JSON.stringify(alarms));
+}
+
+/** Перевіряє збережені метадані мелодії (старі записи можуть бути без них). */
+function normalizeMelody(value: unknown): AlarmMelody | null {
+  if (!value || typeof value !== 'object') return null;
+  const melody = value as Partial<AlarmMelody>;
+  if (typeof melody.fileName !== 'string' || !melody.fileName) return null;
+  if (typeof melody.duration !== 'number' || !Number.isFinite(melody.duration)) return null;
+  if (melody.duration <= 0 || melody.duration > 30) return null;
+  return {
+    fileName: melody.fileName,
+    duration: melody.duration,
+    size: typeof melody.size === 'number' ? melody.size : 0,
+  };
 }
 
 function loadUid(key: string): number | null {
@@ -222,12 +238,17 @@ export default function App() {
   const addAlarm = (time: string, label: string, days: string[]) => {
     setAlarms((prev) => [
       ...prev,
-      { id: uid(), time, enabled: true, label, soundOn: true, daysOfWeek: days },
+      { id: uid(), time, enabled: true, label, soundOn: true, daysOfWeek: days, melody: null },
     ]);
   };
 
   const deleteAlarm = (id: string) => {
+    void deleteAlarmMelody(id);
     setAlarms((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const setAlarmMelody = (id: string, melody: AlarmMelody | null) => {
+    setAlarms((prev) => prev.map((a) => (a.id === id ? { ...a, melody } : a)));
   };
 
   const toggleAlarm = (id: string) => {
@@ -469,6 +490,7 @@ export default function App() {
               onToggleSound={toggleAlarmSound}
               onToggleDay={toggleAlarmDay}
               onDismissed={dismissAlarm}
+              onMelodyChange={setAlarmMelody}
               safetyStatus={alertState.status}
               alertLevel={alertState.level}
               postponeOnRed={postponeOnRed}

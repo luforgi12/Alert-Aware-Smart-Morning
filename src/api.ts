@@ -1,12 +1,9 @@
 import type { SafetyStatus } from './types';
 
-// У dev-режимі запит іде через Vite-проксі (див. vite.config.ts) на локальний бекенд
-// (server.js), який сам додає токен. Тому ключ не потрапляє в браузер.
-// У продакшн-збірці фронтенд звертається до alerts.in.ua напряму з токеном.
-const IS_DEV = import.meta.env.DEV;
-const ALERTS_ENDPOINT = IS_DEV
-  ? '/api/alerts'
-  : 'https://api.alerts.in.ua/v1/alerts/active.json';
+// Запит завжди йде на власний бекенд (server.js): у dev — через Vite-проксі,
+// у продакшні — той самий Express, який роздає dist і додає токен.
+// Токен ніколи не потрапляє в браузер.
+const ALERTS_ENDPOINT = '/api/alerts';
 
 type AlertLevel = 'red' | 'yellow';
 
@@ -33,14 +30,16 @@ export interface AlertFetchResult {
   note: string | null;
 }
 
-/** Токен з файлу "API" (див. vite.config.ts та src/vite-env.d.ts). */
-function apiKey(): string {
-  return typeof __ALERTS_API_KEY__ === 'string' ? __ALERTS_API_KEY__ : '';
-}
-
-/** Чи налаштовано токен у файлі "API". */
-export function hasAlertsKey(): boolean {
-  return apiKey().trim().length > 0;
+/** Чи налаштовано токен alerts.in.ua на сервері. */
+export async function hasAlertsKey(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.alerts);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -50,12 +49,8 @@ export function hasAlertsKey(): boolean {
 export async function fetchAlertStatus(
   query: AlertsQuery
 ): Promise<AlertFetchResult | null> {
-  if (!hasAlertsKey()) return null;
-
   try {
-    const res = await fetch(ALERTS_ENDPOINT, {
-      headers: IS_DEV ? undefined : { Authorization: `Bearer ${apiKey()}` },
-    });
+    const res = await fetch(ALERTS_ENDPOINT);
     if (!res.ok) return null;
 
     const data = await res.json();

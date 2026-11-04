@@ -121,7 +121,18 @@ export default function App() {
   );
 
   const regionName = district?.name ?? oblast?.name ?? '';
-  const alertsKeyConnected = hasAlertsKey();
+  // Чи налаштовано ключ на сервері (сам токен у браузер не потрапляє).
+  const [alertsKeyConnected, setAlertsKeyConnected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void hasAlertsKey().then((connected) => {
+      if (!cancelled) setAlertsKeyConnected(connected);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Apply + persist theme
   useEffect(() => {
@@ -170,7 +181,7 @@ export default function App() {
 
   const refreshAlertStatus = useCallback(async () => {
     const selectedOblast = oblastByUid(oblastUid);
-    if (!selectedOblast || !hasAlertsKey()) return;
+    if (!selectedOblast || alertsKeyConnected !== true) return;
 
     const selectedDistrict = district;
     const requestId = alertRequestRef.current + 1;
@@ -190,7 +201,7 @@ export default function App() {
         : { status: null, level: null, checkedAt: Date.now(), note: null }
     );
     setCheckingAlerts(false);
-  }, [oblastUid, district]);
+  }, [oblastUid, district, alertsKeyConnected]);
 
   // Автооновлення статусу кожні 30 секунд, коли є ключ і вибрана область.
   useEffect(() => {
@@ -291,9 +302,12 @@ export default function App() {
 
   let indicatorTitle = 'Немає даних';
   let indicatorHint = 'Додайте токен API у файл API';
-  if (!alertsKeyConnected) {
+  if (alertsKeyConnected === false) {
     indicatorTitle = 'Немає даних';
     indicatorHint = 'Ключ API не задано — статус тривоги недоступний';
+  } else if (alertsKeyConnected === null) {
+    indicatorTitle = 'Перевіряємо…';
+    indicatorHint = 'З’ясовуємо стан сервера';
   } else if (oblastUid === null) {
     indicatorTitle = 'Оберіть область';
     indicatorHint = 'Оберіть область або район, щоб бачити статус тривоги';
@@ -468,7 +482,7 @@ export default function App() {
               <span className="text-muted-soft">
                 {alertsKeyConnected
                   ? 'Дані alerts.in.ua · автооновлення кожні 30 секунд'
-                  : 'Ключ API не задано у файлі API'}
+                  : 'Сервер API недоступний'}
               </span>
             </div>
           </div>

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: alert-aware
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      # Значення додається вручну в Dashboard → Environment (не комітиться).
+      - key: ALERTS_API_KEY
+        sync: false

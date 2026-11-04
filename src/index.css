@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+
+  --color-ink: 11 15 25;
+  --color-ink-soft: 15 20 36;
+  --color-ink-card: 20 26 46;
+  --color-ink-border: 31 39 64;
+  --color-fg: 255 255 255;
+  --color-fg-soft: 209 213 219;
+  --color-muted: 156 163 175;
+  --color-muted-soft: 107 114 128;
+  --color-accent: 251 191 36;
+}
+
+:root.light {
+  color-scheme: light;
+
+  --color-ink: 248 250 252;
+  --color-ink-soft: 241 245 249;
+  --color-ink-card: 255 255 255;
+  --color-ink-border: 226 232 240;
+  --color-fg: 15 23 42;
+  --color-fg-soft: 51 65 85;
+  --color-muted: 71 85 105;
+  --color-muted-soft: 100 116 139;
+  --color-accent: 180 83 9;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-ink text-fg;
+}

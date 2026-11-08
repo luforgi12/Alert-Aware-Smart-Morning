@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   Bell, BellRing, Plus, Trash2, Volume2, VolumeX,
-  Moon, Sunrise, Play, Square,
+  Moon, Sunrise, Play, Square, AlarmClock,
   Music2, Upload, Loader2, Pause, X,
 } from 'lucide-react';
 import type { SafetyStatus, AlarmItem, AlarmMelody } from '../types';
@@ -21,6 +21,14 @@ const DAYS = [
 ];
 
 const ALL_DAYS = DAYS.map((d) => d.code);
+
+/** Варіанти відкладання дзвінка (у хвилинах). */
+const SNOOZE_OPTIONS = [5, 10];
+
+/** Повторний дзвінок після відкладання — час у мілісекундах. */
+function snoozeTimestamp(minutes: number): number {
+  return Date.now() + minutes * 60_000;
+}
 
 /** Код дня тижня (Mon..Sun) для переданої дати. */
 function dayCode(date: Date): string {
@@ -202,6 +210,8 @@ function AlarmRow({
 }: RowProps) {
   const [triggered, setTriggered] = useState(false);
   const [postponed, setPostponed] = useState(false);
+  // Час, коли відкладений будильник має задзвонити знову (null — не відкладено).
+  const [snoozedUntil, setSnoozedUntil] = useState<number | null>(null);
   const [timeLeft, setTimeLeft] = useState('');
   const [melodyBusy, setMelodyBusy] = useState(false);
   const [melodyError, setMelodyError] = useState<string | null>(null);
@@ -295,6 +305,7 @@ function AlarmRow({
     if (!alarm.enabled) {
       setTriggered(false);
       setPostponed(false);
+      setSnoozedUntil(null);
       setTimeLeft('');
       stopBeep();
       return;
@@ -308,6 +319,15 @@ function AlarmRow({
 
       if (Number.isNaN(hours) || Number.isNaN(minutes)) {
         setTimeLeft('');
+        return;
+      }
+
+      // --- Час відкладеного дзвінка вийшов — дзвонимо знову ---
+      if (snoozedUntil !== null && now.getTime() >= snoozedUntil) {
+        setSnoozedUntil(null);
+        // Якщо саме зараз тривога і перенесення ввімкнене — знову чекаємо відбою.
+        if (shouldPostpone) setPostponed(true);
+        else setTriggered(true);
         return;
       }
 
@@ -356,7 +376,7 @@ function AlarmRow({
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [alarm.enabled, alarm.time, shouldPostpone, daysKey, stopBeep]);
+  }, [alarm.enabled, alarm.time, shouldPostpone, daysKey, stopBeep, snoozedUntil]);
 
   // Коли перенесення більше не потрібне (відбій або вимкнене
   // налаштування) — дзвонимо.
@@ -439,10 +459,21 @@ function AlarmRow({
 
   const dismiss = () => {
     setTriggered(false);
+    setSnoozedUntil(null);
     stopBeep();
     stopRingAudio();
     stopPreview();
     onDismissed();
+  };
+
+  /** Відкласти дзвінок: вимикає звук і планує повторне спрацювання. */
+  const snooze = (minutes: number) => {
+    setTriggered(false);
+    setPostponed(false);
+    stopBeep();
+    stopRingAudio();
+    stopPreview();
+    setSnoozedUntil(snoozeTimestamp(minutes));
   };
 
   /** Завантаження власної мелодії: перевірка формату/тривалості + збереження. */
@@ -502,6 +533,13 @@ function AlarmRow({
 
   const isRinging = triggered;
   const isPostponed = postponed && !triggered;
+  const isSnoozed = snoozedUntil !== null && !triggered;
+  const snoozeLabel = snoozedUntil
+    ? new Date(snoozedUntil).toLocaleTimeString('uk-UA', {
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : '';
   const sortedDays = useMemo(
     () => DAYS.filter((d) => days.includes(d.code)),
     [daysKey] // eslint-disable-line react-hooks/exhaustive-deps
@@ -512,16 +550,20 @@ function AlarmRow({
       className={`rounded-lg border p-4 transition-all ${
         isRinging
           ? 'border-amber-500 bg-amber-500/10 animate-glow-alert'
-          : isPostponed
-            ? 'border-alert/50 bg-alert/5'
-            : alarm.enabled
-              ? 'border-amber-500/40 bg-amber-500/5'
-              : 'border-ink-border bg-ink-soft'
+          : isSnoozed
+            ? 'border-amber-500/50 bg-amber-500/5'
+            : isPostponed
+              ? 'border-alert/50 bg-alert/5'
+              : alarm.enabled
+                ? 'border-amber-500/40 bg-amber-500/5'
+                : 'border-ink-border bg-ink-soft'
       }`}
     >
       <div className="flex items-center gap-3">
         {isRinging ? (
           <BellRing className="w-5 h-5 text-accent animate-pulse flex-shrink-0" />
+        ) : isSnoozed ? (
+          <AlarmClock className="w-5 h-5 text-accent flex-shrink-0" />
         ) : isPostponed ? (
           <Moon className="w-5 h-5 text-alert flex-shrink-0" />
         ) : (
@@ -541,9 +583,13 @@ function AlarmRow({
           {alarm.label && (
             <p className="text-sm text-muted truncate">{alarm.label}</p>
           )}
-          {timeLeft && (
+          {(timeLeft || isSnoozed) && (
             <p className="text-xs text-muted-soft truncate">
-              {isRinging ? 'дзвонить зараз' : timeLeft}
+              {isRinging
+                ? 'дзвонить зараз'
+                : isSnoozed
+                  ? `відкладено до ${snoozeLabel}`
+                  : timeLeft}
             </p>
           )}
         </div>
@@ -660,7 +706,7 @@ function AlarmRow({
 
       {/* Банер дзвінка */}
       {isRinging && (
-        <div className="mt-3 flex items-center justify-between gap-3 animate-fade-in">
+        <div className="mt-3 space-y-2.5 animate-fade-in" role="alert">
           <div className="flex items-start gap-2">
             <Sunrise className="w-4 h-4 text-accent flex-shrink-0 mt-0.5" />
             <div>
@@ -680,9 +726,49 @@ function AlarmRow({
               )}
             </div>
           </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {SNOOZE_OPTIONS.map((minutes, index) => (
+              <button
+                key={minutes}
+                onClick={() => snooze(minutes)}
+                className={
+                  index === 0
+                    ? 'flex items-center gap-1.5 text-sm bg-amber-500 hover:bg-amber-400 text-ink font-semibold rounded-md px-3 py-1.5 transition-colors'
+                    : 'text-sm border border-amber-500/40 text-accent hover:bg-amber-500/10 font-medium rounded-md px-3 py-1.5 transition-colors'
+                }
+              >
+                {index === 0 && <AlarmClock className="w-3.5 h-3.5" />}
+                Відкласти {minutes} хв
+              </button>
+            ))}
+            <button
+              onClick={dismiss}
+              className="ml-auto text-sm border border-ink-border text-muted hover:text-fg rounded-md px-3 py-1.5 transition-colors"
+            >
+              Вимкнути
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Банер відкладеного дзвінка */}
+      {isSnoozed && (
+        <div className="mt-3 flex items-center justify-between gap-3 animate-fade-in">
+          <div className="flex items-start gap-2">
+            <AlarmClock className="w-4 h-4 text-accent flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm text-accent font-medium">
+                Відкладено до {snoozeLabel}
+              </p>
+              <p className="text-xs text-muted-soft mt-0.5">
+                Дзвінок повториться автоматично. Не закривайте вкладку.
+              </p>
+            </div>
+          </div>
           <button
             onClick={dismiss}
-            className="text-sm bg-amber-500 hover:bg-amber-400 text-ink font-semibold rounded-md px-3 py-1 transition-colors"
+            className="text-sm border border-ink-border text-muted hover:text-fg rounded-md px-3 py-1 transition-colors flex-shrink-0"
           >
             Вимкнути
           </button>

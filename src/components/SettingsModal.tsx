@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
-import { X, Moon, Sun, Check } from 'lucide-react';
+import { X, Moon, Sun, Check, BellRing, MonitorSmartphone } from 'lucide-react';
 
 export type Theme = 'dark' | 'light';
+
+export type NotificationPermissionState = 'granted' | 'denied' | 'default' | 'unsupported';
 
 interface Props {
   open: boolean;
@@ -12,6 +14,10 @@ interface Props {
   onPostponeOnRedChange: (value: boolean) => void;
   postponeOnYellow: boolean;
   onPostponeOnYellowChange: (value: boolean) => void;
+  keepAwake: boolean;
+  onKeepAwakeChange: (value: boolean) => void;
+  notificationState: NotificationPermissionState;
+  onRequestNotifications: () => void;
 }
 
 const THEMES: Array<{
@@ -46,6 +52,10 @@ export function SettingsModal({
   onPostponeOnRedChange,
   postponeOnYellow,
   onPostponeOnYellowChange,
+  keepAwake,
+  onKeepAwakeChange,
+  notificationState,
+  onRequestNotifications,
 }: Props) {
   useEffect(() => {
     if (!open) return;
@@ -57,6 +67,15 @@ export function SettingsModal({
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const notificationText =
+    notificationState === 'granted'
+      ? 'Увімкнено. Будильник покаже системне сповіщення, навіть якщо вкладка не на екрані.'
+      : notificationState === 'denied'
+        ? 'Заблоковано в налаштуваннях браузера. Дозвольте сповіщення для цього сайту вручну.'
+        : notificationState === 'unsupported'
+          ? 'Браузер не підтримує системні сповіщення.'
+          : 'Не увімкнено. Дозвольте, щоб не пропустити будильник у фоні.';
 
   return (
     <div
@@ -173,6 +192,65 @@ export function SettingsModal({
                   }`}
                 />
               </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <label className="text-sm text-fg-soft font-medium">Надійність будильника</label>
+          <div className="mt-3 space-y-3">
+            <div className="flex items-start justify-between gap-4 rounded-xl border border-ink-border bg-ink p-4">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-medium text-fg">
+                  <MonitorSmartphone className="w-4 h-4 text-accent flex-shrink-0" />
+                  Не давати екрану заснути
+                </p>
+                <p className="text-xs text-muted-soft mt-1 leading-relaxed">
+                  Поки є активні будильники, екран не гасне, а вкладка не
+                  «заморожується». Найнадійніший варіант для нічного будильника.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={keepAwake}
+                aria-label="Не давати екрану заснути, поки є активні будильники"
+                onClick={() => onKeepAwakeChange(!keepAwake)}
+                className={`relative flex-shrink-0 w-11 h-6 rounded-full transition-colors ${
+                  keepAwake ? 'bg-amber-500' : 'bg-ink-border'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    keepAwake ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-start justify-between gap-4 rounded-xl border border-ink-border bg-ink p-4">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-medium text-fg">
+                  <BellRing className="w-4 h-4 text-accent flex-shrink-0" />
+                  Системні сповіщення
+                </p>
+                <p className="text-xs text-muted-soft mt-1 leading-relaxed">
+                  {notificationText}
+                </p>
+              </div>
+              {notificationState === 'granted' ? (
+                <span className="flex items-center justify-center w-8 h-8 rounded-full bg-safe/15 text-safe flex-shrink-0">
+                  <Check className="w-4 h-4" />
+                </span>
+              ) : notificationState === 'default' ? (
+                <button
+                  type="button"
+                  onClick={onRequestNotifications}
+                  className="flex-shrink-0 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-amber-950 rounded-md px-3 py-1.5 transition-colors"
+                >
+                  Дозволити
+                </button>
+              ) : null}
             </div>
           </div>
         </div>

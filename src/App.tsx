@@ -5,6 +5,8 @@ import { SettingsModal } from './components/SettingsModal';
 import { Alarm } from './components/Alarm';
 import { hasAlertsKey, fetchAlertStatus } from './api';
 import { deleteAlarmMelody } from './soundStore';
+import { deleteAlarmRuntime } from './alarmRuntime';
+import { useWakeLock } from './useWakeLock';
 import { OBLASTS, districtsOf, oblastByUid } from './locations';
 import type { AlertState, AlarmItem, AlarmMelody } from './types';
 import type { Theme } from './components/SettingsModal';
@@ -15,6 +17,14 @@ const LS_DISTRICT = 'selected_district_uid';
 const LS_THEME = 'app_theme';
 const LS_POSTPONE_RED = 'postpone_on_red';
 const LS_POSTPONE_YELLOW = 'postpone_on_yellow';
+const LS_KEEP_AWAKE = 'keep_screen_awake';
+
+type NotificationState = 'granted' | 'denied' | 'default' | 'unsupported';
+
+function getNotificationState(): NotificationState {
+  if (typeof Notification === 'undefined') return 'unsupported';
+  return Notification.permission;
+}
 
 function loadTheme(): Theme {
   try {
@@ -96,6 +106,14 @@ function loadPostponeOnYellow(): boolean {
   }
 }
 
+function loadKeepAwake(): boolean {
+  try {
+    return localStorage.getItem(LS_KEEP_AWAKE) === 'true';
+  } catch {
+    return false;
+  }
+}
+
 function uid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
@@ -105,6 +123,9 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [postponeOnRed, setPostponeOnRed] = useState<boolean>(loadPostponeOnRed);
   const [postponeOnYellow, setPostponeOnYellow] = useState<boolean>(loadPostponeOnYellow);
+  const [keepAwake, setKeepAwake] = useState<boolean>(loadKeepAwake);
+  const [notificationState, setNotificationState] =
+    useState<NotificationState>(getNotificationState);
   const [oblastUid, setOblastUid] = useState<number | null>(() => loadUid(LS_OBLAST));
   const [districtUid, setDistrictUid] = useState<number | null>(() => loadUid(LS_DISTRICT));
   const [alertState, setAlertState] = useState<AlertState>({
@@ -164,6 +185,29 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(LS_POSTPONE_YELLOW, String(postponeOnYellow));
   }, [postponeOnYellow]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_KEEP_AWAKE, String(keepAwake));
+  }, [keepAwake]);
+
+  // Тримаємо екран увімкненим, поки є активні будильники (за бажанням).
+  // Це не дає браузеру «заморозити» таймери будильника вночі.
+  const hasEnabledAlarms = alarms.some((a) => a.enabled);
+  useWakeLock(keepAwake && hasEnabledAlarms);
+
+  // Дозвіл на системні сповіщення — щоб побачити будильник,
+  // навіть коли вкладка не на екрані.
+  const requestNotifications = useCallback(async () => {
+    if (typeof Notification === 'undefined') {
+      setNotificationState('unsupported');
+      return;
+    }
+    try {
+      setNotificationState(await Notification.requestPermission());
+    } catch {
+      setNotificationState(getNotificationState());
+    }
+  }, []);
 
   // Прибираємо ключі, які раніше зберігалися вручну через налаштування.
   useEffect(() => {
@@ -244,6 +288,7 @@ export default function App() {
 
   const deleteAlarm = (id: string) => {
     void deleteAlarmMelody(id);
+    deleteAlarmRuntime(id);
     setAlarms((prev) => prev.filter((a) => a.id !== id));
   };
 
@@ -507,6 +552,14 @@ export default function App() {
                   : 'Сервер API недоступний'}
               </span>
             </div>
+
+            {/* Обмеження та порада щодо надійності будильника */}
+            {hasEnabledAlarms && (
+              <p className="text-xs text-muted-soft leading-relaxed">
+                Будильник працює, поки вкладка відкрита. Не закривайте її — а в
+                налаштуваннях можна ввімкнути захист екрана та сповіщення.
+              </p>
+            )}
           </div>
         </div>
       </main>
@@ -520,6 +573,10 @@ export default function App() {
         onPostponeOnRedChange={setPostponeOnRed}
         postponeOnYellow={postponeOnYellow}
         onPostponeOnYellowChange={setPostponeOnYellow}
+        keepAwake={keepAwake}
+        onKeepAwakeChange={setKeepAwake}
+        notificationState={notificationState}
+        onRequestNotifications={() => void requestNotifications()}
       />
     </div>
   );

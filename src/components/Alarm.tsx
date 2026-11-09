@@ -8,6 +8,7 @@ import type { SafetyStatus, AlarmItem, AlarmMelody } from '../types';
 import {
   MAX_MELODY_SECONDS, deleteAlarmMelody, formatDuration, getAlarmMelody, prepareAlarmMelody, saveAlarmMelody,
 } from '../soundStore';
+import { getAlarmRuntime, saveAlarmRuntime } from '../alarmRuntime';
 
 /** Порядок з понеділка. `code` зберігається у localStorage. */
 const DAYS = [
@@ -25,6 +26,14 @@ const ALL_DAYS = DAYS.map((d) => d.code);
 /** Варіанти відкладання дзвінка (у хвилинах). */
 const SNOOZE_OPTIONS = [5, 10];
 
+/**
+ * Скільки часу після запланованого моменту будильник ще може задзвонити,
+ * якщо вкладка була призупинена браузером (сон ноутбука/телефона).
+ * 2 години — щоб ранковий будильник не «загубився», якщо пристрій
+ * прокинувся пізніше.
+ */
+const CATCH_UP_MS = 2 * 60 * 60 * 1000;
+
 /** Повторний дзвінок після відкладання — час у мілісекундах. */
 function snoozeTimestamp(minutes: number): number {
   return Date.now() + minutes * 60_000;
@@ -33,6 +42,32 @@ function snoozeTimestamp(minutes: number): number {
 /** Код дня тижня (Mon..Sun) для переданої дати. */
 function dayCode(date: Date): string {
   return DAYS[(date.getDay() + 6) % 7].code;
+}
+
+/**
+ * Останній дозволений момент спрацювання, що вже минув (або `null`).
+ * Використовується для «наздоганяючого» спрацювання після сну вкладки.
+ */
+function lastOccurrence(
+  now: Date,
+  hours: number,
+  minutes: number,
+  allowed: string[]
+): Date | null {
+  for (let i = 0; i < 8; i += 1) {
+    const candidate = new Date(now);
+    candidate.setDate(now.getDate() - i);
+    candidate.setHours(hours, minutes, 0, 0);
+    if (candidate.getTime() > now.getTime()) continue;
+    if (!allowed.includes(dayCode(candidate))) continue;
+    return candidate;
+  }
+  return null;
+}
+
+/** Ключ спрацювання: дата + час (не змінюється між перезавантаженнями). */
+function fireKey(occurrence: Date, time: string): string {
+  return `${occurrence.toDateString()} ${time}`;
 }
 
 interface Props {
@@ -208,10 +243,15 @@ function AlarmRow({
   alarm, safetyStatus, alertLevel, postponeOnRed, postponeOnYellow, regionName,
   onToggle, onSetTime, onToggleSound, onToggleDay, onDelete, onDismissed, onMelodyChange,
 }: RowProps) {
+  // Стан, збережений у localStorage: переживає перезавантаження вкладки.
+  const initialRuntime = useMemo(() => getAlarmRuntime(alarm.id), [alarm.id]);
+
   const [triggered, setTriggered] = useState(false);
-  const [postponed, setPostponed] = useState(false);
+  const [postponed, setPostponed] = useState<boolean>(initialRuntime?.postponed ?? false);
   // Час, коли відкладений будильник має задзвонити знову (null — не відкладено).
-  const [snoozedUntil, setSnoozedUntil] = useState<number | null>(null);
+  const [snoozedUntil, setSnoozedUntil] = useState<number | null>(
+    initialRuntime?.snoozedUntil ?? null
+  );
   const [timeLeft, setTimeLeft] = useState('');
   const [melodyBusy, setMelodyBusy] = useState(false);
   const [melodyError, setMelodyError] = useState<string | null>(null);
@@ -224,7 +264,28 @@ function AlarmRow({
   const previewUrlRef = useRef<string | null>(null);
   const previewTokenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const firedKeyRef = useRef<string>('');
+  const firedKeyRef = useRef<string>(initialRuntime?.firedKey ?? '');
+  // Час останнього «озброєння» будильника (вмикання / зміна часу чи днів).
+  const armedAtRef = useRef<number>(initialRuntime?.armedAt ?? Date.now());
+
+  /** Зберігає поточний стан будильника у localStorage. */
+  const writeRuntime = useCallback(
+    (next: {
+      postponed: boolean;
+      snoozedUntil: number | null;
+      firedKey?: string;
+      armedAt?: number;
+    }) => {
+      saveAlarmRuntime(alarm.id, {
+        armedAt: next.armedAt ?? armedAtRef.current,
+        firedKey: next.firedKey !== undefined ? next.firedKey : firedKeyRef.current,
+        postponed: next.postponed,
+        snoozedUntil: next.snoozedUntil,
+      });
+    },
+    [alarm.id]
+  );
+
 
   const days = alarm.daysOfWeek && alarm.daysOfWeek.length > 0 ? alarm.daysOfWeek : ALL_DAYS;
   const daysKey = days.join(',');
@@ -232,6 +293,37 @@ function AlarmRow({
   // Кожен рівень тривоги має власне налаштування перенесення.
   const postponeForLevel = alertLevel === 'yellow' ? postponeOnYellow : postponeOnRed;
   const shouldPostpone = safetyStatus === 'alert' && postponeForLevel;
+
+  // Зберігаємо зміни стану, щоб вони пережили перезавантаження вкладки.
+  useEffect(() => {
+    writeRuntime({ postponed, snoozedUntil });
+  }, [writeRuntime, postponed, snoozedUntil]);
+
+  // Після вмикання або зміни часу/днів не «наздоганяємо» час, який уже минув
+  // (інакше щойно створений будильник міг би задзвонити одразу).
+  const prevEnabledRef = useRef(alarm.enabled);
+  const prevTimeRef = useRef(alarm.time);
+  const prevDaysKeyRef = useRef(daysKey);
+
+  useEffect(() => {
+    const becameEnabled = alarm.enabled && !prevEnabledRef.current;
+    const timeChanged = prevTimeRef.current !== alarm.time;
+    const daysChanged = prevDaysKeyRef.current !== daysKey;
+
+    prevEnabledRef.current = alarm.enabled;
+    prevTimeRef.current = alarm.time;
+    prevDaysKeyRef.current = daysKey;
+
+    if (!alarm.enabled) return;
+    if (!becameEnabled && !timeChanged && !daysChanged) return;
+
+    armedAtRef.current = Date.now();
+    firedKeyRef.current = '';
+    setTriggered(false);
+    setPostponed(false);
+    setSnoozedUntil(null);
+    writeRuntime({ postponed: false, snoozedUntil: null, firedKey: '', armedAt: armedAtRef.current });
+  }, [alarm.enabled, alarm.time, daysKey, writeRuntime]);
 
   const stopBeep = useCallback(() => {
     if (beepRef.current) {
@@ -325,9 +417,19 @@ function AlarmRow({
       // --- Час відкладеного дзвінка вийшов — дзвонимо знову ---
       if (snoozedUntil !== null && now.getTime() >= snoozedUntil) {
         setSnoozedUntil(null);
+        // Якщо вкладка була закрита надовго, старе відкладання не дзвонимо.
+        if (now.getTime() - snoozedUntil > CATCH_UP_MS) {
+          writeRuntime({ postponed: false, snoozedUntil: null });
+          return;
+        }
         // Якщо саме зараз тривога і перенесення ввімкнене — знову чекаємо відбою.
-        if (shouldPostpone) setPostponed(true);
-        else setTriggered(true);
+        if (shouldPostpone) {
+          setPostponed(true);
+          writeRuntime({ postponed: true, snoozedUntil: null });
+        } else {
+          setTriggered(true);
+          writeRuntime({ postponed: false, snoozedUntil: null });
+        }
         return;
       }
 
@@ -358,13 +460,23 @@ function AlarmRow({
         }
       }
 
-      // --- Спрацювання ---
-      if (!allowed.includes(dayCode(now))) return;
-      if (now.getHours() !== hours || now.getMinutes() !== minutes) return;
+      // --- Спрацювання з «наздоганяючим» вікном ---
+      // Якщо вкладку призупинили (сон пристрою), таймер міг «проспати»
+      // точну хвилину. Тоді спрацьовуємо, щойно браузер прокинеться.
+      const occurrence = lastOccurrence(now, hours, minutes, allowed);
+      if (!occurrence) return;
+      if (now.getTime() - occurrence.getTime() > CATCH_UP_MS) return;
+      // Не дзвонимо за час, який минув ще до вмикання будильника.
+      if (armedAtRef.current > occurrence.getTime()) return;
 
-      const key = `${now.toDateString()} ${alarm.time}`;
+      const key = fireKey(occurrence, alarm.time);
       if (firedKeyRef.current === key) return;
       firedKeyRef.current = key;
+      writeRuntime({
+        postponed: shouldPostpone,
+        snoozedUntil: null,
+        firedKey: key,
+      });
 
       if (shouldPostpone) {
         setPostponed(true);
@@ -375,17 +487,35 @@ function AlarmRow({
 
     tick();
     const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [alarm.enabled, alarm.time, shouldPostpone, daysKey, stopBeep, snoozedUntil]);
+
+    // Прокидання вкладки: одразу перевіряємо пропущені спрацювання.
+    const wake = () => tick();
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('pageshow', wake);
+    window.addEventListener('online', wake);
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('focus', wake);
+      window.removeEventListener('pageshow', wake);
+      window.removeEventListener('online', wake);
+    };
+  }, [alarm.enabled, alarm.time, shouldPostpone, daysKey, stopBeep, snoozedUntil, writeRuntime]);
 
   // Коли перенесення більше не потрібне (відбій або вимкнене
-  // налаштування) — дзвонимо.
+  // налаштування) — дзвонимо. Чекаємо на статус тривоги, щоб після
+  // перезавантаження не дзвонити ще до отримання даних.
   useEffect(() => {
-    if (postponed && !shouldPostpone) {
-      setTriggered(true);
-      setPostponed(false);
-    }
-  }, [postponed, shouldPostpone]);
+    if (!postponed) return;
+    if (safetyStatus === null) return;
+    if (shouldPostpone) return;
+
+    setTriggered(true);
+    setPostponed(false);
+    writeRuntime({ postponed: false, snoozedUntil: null });
+  }, [postponed, shouldPostpone, safetyStatus, writeRuntime]);
 
   // Цикл звуку: власна MP3-мелодія, а якщо її немає — стандартний сигнал.
   useEffect(() => {
@@ -447,6 +577,53 @@ function AlarmRow({
     playBeep, stopBeep, stopRingAudio, stopPreview,
   ]);
 
+  // Коли вкладка не на екрані — показуємо системне сповіщення та міняємо
+  // заголовок, щоб будильник не загубився серед інших вікон.
+  useEffect(() => {
+    if (!triggered) return;
+
+    const previousTitle = document.title;
+    document.title = '🔔 Підйом! — Alert-Aware';
+
+    // Вібрація працює лише після взаємодії зі сторінкою — інакше браузер
+    // блокує виклик і пише помилку в консоль.
+    const canVibrate =
+      typeof navigator.vibrate === 'function' &&
+      (navigator.userActivation?.hasBeenActive ?? true);
+    if (canVibrate) {
+      navigator.vibrate([400, 200, 400]);
+    }
+
+    let notification: Notification | null = null;
+    if (
+      document.visibilityState === 'hidden' &&
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'granted'
+    ) {
+      try {
+        notification = new Notification('Підйом! Час вставати', {
+          body: alarm.label ? `${alarm.label} · ${alarm.time}` : `Будильник на ${alarm.time}`,
+          tag: `alarm-${alarm.id}`,
+          requireInteraction: true,
+          silent: !alarm.soundOn,
+        });
+        notification.onclick = () => {
+          window.focus();
+          notification?.close();
+        };
+      } catch {
+        // На мобільних Chrome конструктор Notification недоступний.
+        notification = null;
+      }
+    }
+
+    return () => {
+      document.title = previousTitle;
+      if (canVibrate) navigator.vibrate(0);
+      notification?.close();
+    };
+  }, [triggered, alarm.id, alarm.label, alarm.time, alarm.soundOn]);
+
   // Прибирання.
   useEffect(() => {
     return () => {
@@ -463,6 +640,7 @@ function AlarmRow({
     stopBeep();
     stopRingAudio();
     stopPreview();
+    writeRuntime({ postponed: false, snoozedUntil: null });
     onDismissed();
   };
 
@@ -473,7 +651,9 @@ function AlarmRow({
     stopBeep();
     stopRingAudio();
     stopPreview();
-    setSnoozedUntil(snoozeTimestamp(minutes));
+    const until = snoozeTimestamp(minutes);
+    setSnoozedUntil(until);
+    writeRuntime({ postponed: false, snoozedUntil: until });
   };
 
   /** Завантаження власної мелодії: перевірка формату/тривалості + збереження. */
@@ -762,7 +942,7 @@ function AlarmRow({
                 Відкладено до {snoozeLabel}
               </p>
               <p className="text-xs text-muted-soft mt-0.5">
-                Дзвінок повториться автоматично. Не закривайте вкладку.
+                Дзвінок повториться автоматично, якщо вкладка відкрита.
               </p>
             </div>
           </div>

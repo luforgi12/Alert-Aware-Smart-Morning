@@ -1,72 +1,75 @@
 # Публікація Alert-Aware
 
-Застосунок — це один Node.js-сервіс: Express (`server.js`) роздає зібраний
-фронтенд із `dist/` і проксіює запити до alerts.in.ua. Токен зберігається
-**лише на сервері** (змінна `ALERTS_API_KEY`) і не потрапляє в браузер.
+Фронтенд публікується на GitHub Pages, а Express (`server.js`) працює як
+окремий API-сервер на Render. Браузер звертається до Render за URL,
+налаштованою під час збірки фронтенду. Токен alerts.in.ua зберігається
+**лише на сервері** у змінній `ALERTS_API_KEY` і ніколи не передається
+браузеру.
 
 ## Що вже підготовлено
 
 - `npm run build` — збірка фронтенду в `dist/`.
-- `npm start` — запуск продакшн-сервера (`node server.js`).
+- `npm start` — запуск API-сервера (`node server.js`).
 - `server.js` — проксі `/api/alerts`, конфіг `/api/config`, health `/health`,
   кеш 25 с + захист від ліміту 12 запитів/хв.
-- `Dockerfile` / `.dockerignore` — для VPS, Fly.io, Railway (Docker).
-- `render.yaml` — готовий blueprint для Render.
+- `.github/workflows/deploy.yml` — автоматична публікація фронтенду на GitHub Pages.
+- `render.yaml` — конфігурація API-сервера на Render.
 
-## Варіант 1. Render (рекомендовано, безкоштовно)
+## 1. API-сервер на Render
 
-1. Завантажте проєкт у GitHub:
-   ```bash
-   git remote add origin https://github.com/<ваш-логін>/alert-aware.git
-   git push -u origin main
-   ```
-2. На [render.com](https://render.com): **New → Web Service** → підключіть репозиторій.
-3. Налаштування:
+1. На [render.com](https://render.com) створіть **New → Blueprint** і підключіть
+   цей GitHub-репозиторій. Render прочитає `render.yaml`.
+2. У **Environment** сервісу задайте:
+   - `ALERTS_API_KEY` = ваш токен з https://alerts.in.ua/api-request
+   - `VITE_CORS_ORIGIN` = `https://luforgi12.github.io`
+3. Переконайтеся, що налаштування сервісу такі:
    - **Runtime:** Node
-   - **Build Command:** `npm ci && npm run build`
+   - **Build Command:** `npm ci`
    - **Start Command:** `npm start`
    - **Health Check Path:** `/health`
-4. **Environment → Add Environment Variable:**
-   - `ALERTS_API_KEY` = ваш токен з https://alerts.in.ua/api-request
-5. Deploy. Отримаєте HTTPS-адресу вигляду `https://alert-aware.onrender.com`.
+4. Запустіть Deploy. Скопіюйте HTTPS URL сервісу, наприклад
+   `https://alert-aware.onrender.com` (точна адреса показана в Render Dashboard).
 
 > Безкоштовний тариф Render «засинає» після ~15 хв без трафіку. Поки вкладка
 > застосунку відкрита, вона опитує API кожні 30 с і тримає сервіс активним.
 > Якщо потрібна гарантована робота 24/7 — платний план або Railway/Fly.io.
 
-## Варіант 2. Railway / Fly.io / VPS (Docker)
+## 2. Фронтенд на GitHub Pages
 
-```bash
-docker build -t alert-aware .
-docker run -p 4000:4000 -e ALERTS_API_KEY=ваш_токен alert-aware
-```
+У GitHub репозиторії відкрийте **Settings → Secrets and variables → Actions →
+Variables** і створіть repository variable:
 
-- Railway: **New Project → Deploy from GitHub** — Dockerfile підхопиться автоматично,
-  додайте `ALERTS_API_KEY` у Variables.
-- Fly.io: `fly launch`, потім `fly secrets set ALERTS_API_KEY=...`.
-- VPS: поставте Docker (або Node 22), задайте `ALERTS_API_KEY` і тримайте
-  процес через systemd/pm2; HTTPS — через Caddy/Nginx.
+- `VITE_API_BASE_URL` = HTTPS origin вашого Render-сервісу, наприклад
+  `https://alert-aware.onrender.com` (без `/api` наприкінці).
+
+Workflow `.github/workflows/deploy.yml` використовує цю змінну під час збірки.
+Після push у `main` фронтенд опублікується автоматично. Якщо змінна не задана,
+збірка не пройде — це запобігає публікації фронтенду з непідключеним API.
+Також можна запустити workflow вручну через **Actions → Deploy to GitHub Pages
+→ Run workflow**.
+
+GitHub Pages має бути увімкнений у **Settings → Pages → Build and deployment →
+Source: GitHub Actions**.
 
 ## Перевірка після деплою
 
-- `https://<домен>/health` → `{"status":"ok"}`
-- `https://<домен>/api/config` → `{"alerts":true}`
-- `https://<домен>/api/alerts` → JSON зі списком тривог
+- `https://<render-домен>/health` → `{"status":"ok"}`
+- `https://<render-домен>/api/config` → `{"alerts":true}`
+- `https://<render-домен>/api/alerts` → JSON зі списком тривог
 - Відкрийте сайт, виберіть область/район — індикатор має показати
   червоний/жовтий/зелений статус.
 
 ## Безпека
 
 - `.server.env`, `API` — у `.gitignore`, у репозиторій не потрапляють.
-- На хостингу токен задається **тільки** через змінну середовища.
-- Токен уже з’являвся у локальних файлах/листуванні — за потреби
-  перевипустіть його на alerts.in.ua і оновіть `ALERTS_API_KEY`.
-- CORS: для same-origin деплою нічого налаштовувати не треба. Якщо фронтенд
-  окремо — задайте `VITE_CORS_ORIGIN=https://ваш-фронтенд`.
+- `ALERTS_API_KEY` задається **тільки** в середовищі Render — не в GitHub
+  Actions, не у `VITE_*` змінній і не в коді фронтенду.
+- `VITE_API_BASE_URL` — це публічна адреса API-сервера, не API-ключ.
+- CORS на Render дозволяє запити з `https://luforgi12.github.io`.
 
 ## Локальний продакшн-прогін
 
 ```bash
 npm run build
-npm start          # http://localhost:4000 — і UI, і API
+npm start          # http://localhost:4000 — API; фронтенд локально через npm run dev
 ```

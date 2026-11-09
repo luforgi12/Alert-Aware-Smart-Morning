@@ -1,9 +1,10 @@
 import type { SafetyStatus } from './types';
 
 // Запит завжди йде на власний бекенд (server.js): у dev — через Vite-проксі,
-// у продакшні — той самий Express, який роздає dist і додає токен.
+// на GitHub Pages — за VITE_API_BASE_URL до Render API.
 // Токен ніколи не потрапляє в браузер.
-const ALERTS_ENDPOINT = '/api/alerts';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, '') ?? '';
+const ALERTS_ENDPOINT = `${API_BASE_URL}/api/alerts`;
 
 type AlertLevel = 'red' | 'yellow';
 
@@ -33,7 +34,7 @@ export interface AlertFetchResult {
 /** Чи налаштовано токен alerts.in.ua на сервері. */
 export async function hasAlertsKey(): Promise<boolean> {
   try {
-    const res = await fetch('/api/config');
+    const res = await fetch(`${API_BASE_URL}/api/config`);
     if (!res.ok) return false;
     const data = await res.json();
     return Boolean(data?.alerts);

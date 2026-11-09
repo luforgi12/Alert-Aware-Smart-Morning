@@ -3,12 +3,14 @@ services:
     name: alert-aware
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: VITE_CORS_ORIGIN
+        value: https://luforgi12.github.io
       # Значення додається вручну в Dashboard → Environment (не комітиться).
       - key: ALERTS_API_KEY
         sync: false
